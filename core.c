@@ -134,12 +134,6 @@ set_append_rel_pathlist(PlannerInfo *root, RelOptInfo *rel,
 		if (IS_DUMMY_REL(childrel))
 			continue;
 
-		/* Bubble up childrel's partitioned children. */
-		if (rel->part_scheme)
-			rel->partitioned_child_rels =
-				list_concat(rel->partitioned_child_rels,
-							childrel->partitioned_child_rels);
-
 		/*
 		 * Child is live, so add it to the live_childrels list for use below.
 		 */
@@ -219,10 +213,11 @@ standard_join_search(PlannerInfo *root, int levels_needed, List *initial_rels)
 		join_search_one_level(root, lev);
 
 		/*
-		 * Run generate_partitionwise_join_paths() and generate_gather_paths()
-		 * for each just-processed joinrel.  We could not do this earlier
-		 * because both regular and partial paths can get added to a
-		 * particular joinrel at multiple times within join_search_one_level.
+		 * Run generate_partitionwise_join_paths() and
+		 * generate_useful_gather_paths() for each just-processed joinrel.  We
+		 * could not do this earlier because both regular and partial paths
+		 * can get added to a particular joinrel at multiple times within
+		 * join_search_one_level.
 		 *
 		 * After that, we're done creating paths for the joinrel, so run
 		 * set_cheapest().

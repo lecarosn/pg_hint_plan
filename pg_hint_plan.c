@@ -400,9 +400,10 @@ void		_PG_fini(void);
 static void push_hint(HintState *hstate);
 static void pop_hint(void);
 
-static void pg_hint_plan_post_parse_analyze(ParseState *pstate, Query *query);
+static void pg_hint_plan_post_parse_analyze(ParseState *pstate, Query *query, JumbleState *jstate);
 static void pg_hint_plan_ProcessUtility(PlannedStmt *pstmt,
 					const char *queryString,
+                    bool readonlyTree,
 					ProcessUtilityContext context,
 					ParamListInfo params, QueryEnvironment *queryEnv,
 					DestReceiver *dest, QueryCompletion *qc);
@@ -2907,8 +2908,9 @@ get_current_hint_string(ParseState *pstate, Query *query)
 			jstate.clocations = (pgssLocationLen *)
 				palloc(jstate.clocations_buf_size * sizeof(pgssLocationLen));
 			jstate.clocations_count = 0;
+            jstate.highest_extern_param_id = 0;
 
-			JumbleQuery(&jstate, jumblequery);
+			JumbleQueryInternal(&jstate, jumblequery);
 
 			/*
 			 * Normalize the query string by replacing constants with '?'
@@ -3018,10 +3020,10 @@ get_current_hint_string(ParseState *pstate, Query *query)
  * Retrieve hint string from the current query.
  */
 static void
-pg_hint_plan_post_parse_analyze(ParseState *pstate, Query *query)
+pg_hint_plan_post_parse_analyze(ParseState *pstate, Query *query, JumbleState *jstate)
 {
 	if (prev_post_parse_analyze_hook)
-		prev_post_parse_analyze_hook(pstate, query);
+		prev_post_parse_analyze_hook(pstate, query, jstate);
 
 	/* always retrieve hint from the top-level query string */
 	if (plpgsql_recurse_level == 0)
@@ -3037,15 +3039,16 @@ pg_hint_plan_post_parse_analyze(ParseState *pstate, Query *query)
  */
 static void
 pg_hint_plan_ProcessUtility(PlannedStmt *pstmt, const char *queryString,
+                    bool readonlyTree,
 					ProcessUtilityContext context,
 					ParamListInfo params, QueryEnvironment *queryEnv,
 					DestReceiver *dest, QueryCompletion *qc)
 {
 	if (prev_ProcessUtility_hook)
-		prev_ProcessUtility_hook(pstmt, queryString, context, params, queryEnv,
+		prev_ProcessUtility_hook(pstmt, queryString, true, context, params, queryEnv,
 								 dest, qc);
 	else
-		standard_ProcessUtility(pstmt, queryString, context, params, queryEnv,
+		standard_ProcessUtility(pstmt, queryString, true, context, params, queryEnv,
 								 dest, qc);
 
 	if (plpgsql_recurse_level == 0)
@@ -3819,52 +3822,6 @@ setup_hint_enforcement(PlannerInfo *root, RelOptInfo *rel,
 							 get_rel_name(relationObjectId),
 							 inhparent, current_hint_state, hint_inhibit_level)));
 		return 0;
-	}
-
-	/*
-	 * Forget about the parent of another subquery, but don't forget if the
-	 * inhTargetkind of the root is not INHKIND_NONE, which signals the root
-	 * contains only appendrel members. See inheritance_planner for details.
-	 *
-	 * (PG12.0) 428b260f87 added one more planning cycle for updates on
-	 * partitioned tables and hints set up in the cycle are overriden by the
-	 * second cycle. Since I didn't find no apparent distinction between the
-	 * PlannerRoot of the cycle and that of ordinary CMD_SELECT, pg_hint_plan
-	 * accepts both cycles and the later one wins. In the second cycle root
-	 * doesn't have inheritance information at all so use the parent_relid set
-	 * in the first cycle.
-	 */
-	if (root->inhTargetKind == INHKIND_NONE)
-	{
-		if (root != current_hint_state->current_root)
-			current_hint_state->parent_relid = 0;
-
-		/* Find the parent for this relation other than the registered parent */
-		foreach (l, root->append_rel_list)
-		{
-			AppendRelInfo *appinfo = (AppendRelInfo *) lfirst(l);
-
-			if (appinfo->child_relid == rel->relid)
-			{
-				if (current_hint_state->parent_relid != appinfo->parent_relid)
-				{
-					new_parent_relid = appinfo->parent_relid;
-					current_hint_state->current_root = root;
-				}
-				break;
-			}
-		}
-
-		if (!l)
-		{
-			/*
-			 * This relation doesn't have a parent. Cancel
-			 * current_hint_state.
-			 */
-			current_hint_state->parent_relid = 0;
-			current_hint_state->parent_scan_hint = NULL;
-			current_hint_state->parent_parallel_hint = NULL;
-		}
 	}
 
 	if (new_parent_relid > 0)
